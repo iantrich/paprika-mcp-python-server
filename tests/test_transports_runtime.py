@@ -1,4 +1,4 @@
-"""Regression tests for the stdio transport's build_runtime() helper.
+"""Regression tests for the shared build_runtime() helper.
 
 Covers Finding 1 from the Task 8 review: build_runtime() must not leak the
 aiohttp session created inside PaprikaClient.authenticate() when
@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from paprika_mcp_server.paprika_client import PaprikaAPIError, PaprikaClient
-from paprika_mcp_server.transports import stdio as stdio_mod
+from paprika_mcp_server.transports import runtime as runtime_mod
 
 
 class _FakeConfig:
@@ -51,10 +51,10 @@ async def test_build_runtime_closes_session_when_authenticate_fails():
     """
     _AuthFailsAfterSessionClient.instances.clear()
 
-    with patch.object(stdio_mod, "get_config", return_value=_FakeConfig()), \
-         patch.object(stdio_mod, "PaprikaClient", _AuthFailsAfterSessionClient):
+    with patch.object(runtime_mod, "get_config", return_value=_FakeConfig()), \
+         patch.object(runtime_mod, "PaprikaClient", _AuthFailsAfterSessionClient):
         with pytest.raises(PaprikaAPIError):
-            await stdio_mod.build_runtime()
+            await runtime_mod.build_runtime()
 
     assert len(_AuthFailsAfterSessionClient.instances) == 1
     client = _AuthFailsAfterSessionClient.instances[0]

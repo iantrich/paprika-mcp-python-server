@@ -20,7 +20,7 @@ Oh, and it can generate food photos for your recipes too (using Flux from Black 
 
 ### What you need
 
-- Python 3.8+ (probably already have it)
+- Python 3.10+ (probably already have it)
 - [Paprika Recipe Manager](https://www.paprikaapp.com/) with cloud sync turned on
 - [Claude Desktop](https://claude.ai/download), [Claude Code](https://docs.claude.ai/docs/claude-code), or any other MCP client
 
@@ -148,7 +148,40 @@ paprika-mcp logs
 
 # Show version
 paprika-mcp version
+
+# Serve over HTTP instead of stdio (see below)
+paprika-mcp serve-http
 ```
+
+## HTTP transport (`serve-http`)
+
+Most clients launch the server over stdio and you never think about it.
+`serve-http` instead serves the same 17 tools over streamable HTTP at
+`POST /mcp`, so a remote agent can reach it. There is also a `GET /healthz`.
+
+```bash
+# Defaults: --host 127.0.0.1 --port 8080
+paprika-mcp serve-http
+
+# Bind elsewhere
+paprika-mcp serve-http --host 127.0.0.1 --port 9000
+
+# Allow a browser-based client from a specific origin (repeatable).
+# Loopback origins are already allowed; non-browser clients send no Origin
+# header and are never blocked, so a tunnel works without this flag.
+paprika-mcp serve-http --allowed-origin https://app.example.com
+```
+
+> **⚠️ This endpoint is UNAUTHENTICATED.** Anyone who can reach it can read,
+> create and **delete** your recipes and clear your grocery list. Authentication
+> is a later phase. Until it lands, do not expose this port to the internet —
+> keep it on `127.0.0.1`, and if you must reach it remotely, put it behind a
+> tunnel or proxy that does the authenticating for you.
+>
+> As a partial defence, requests carrying a cross-origin `Origin` header are
+> rejected with 403, which stops a DNS-rebinding attack from a web page you
+> happen to visit. That is not a substitute for auth: it does not stop anything
+> that isn't a browser.
 
 ## AI Image Generation
 

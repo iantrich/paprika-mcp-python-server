@@ -3,7 +3,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import List, NoReturn, Optional
 
 from paprika_mcp_server import __version__
 
@@ -22,12 +22,16 @@ def run_server() -> None:
         sys.exit(1)
 
 
-def serve_http(host: str = "127.0.0.1", port: int = 8080) -> None:
+def serve_http(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    allowed_origins: Optional[List[str]] = None,
+) -> None:
     """Run the MCP server over streamable HTTP."""
     from paprika_mcp_server.transports.http import run_http
 
     try:
-        run_http(host=host, port=port)
+        run_http(host=host, port=port, allowed_origins=allowed_origins)
     except KeyboardInterrupt:
         print("\nServer stopped.")
         sys.exit(0)
@@ -170,6 +174,19 @@ def main() -> NoReturn:
         default=8080,
         help="Port to listen on (default: 8080)",
     )
+    serve_http_parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        dest="allowed_origins",
+        metavar="ORIGIN",
+        default=None,
+        help=(
+            "Extra browser Origin to accept, e.g. https://app.example.com. "
+            "Repeatable. Loopback origins are always accepted, and requests "
+            "with no Origin header (the usual non-browser MCP client, "
+            "including through a tunnel) are never blocked."
+        ),
+    )
 
     # Setup command
     setup_parser = subparsers.add_parser(
@@ -192,7 +209,7 @@ def main() -> NoReturn:
 
     # Route to appropriate command
     if args.command == "serve-http":
-        serve_http(host=args.host, port=args.port)
+        serve_http(host=args.host, port=args.port, allowed_origins=args.allowed_origins)
     elif args.command == "setup":
         setup_wizard()
     elif args.command == "config":

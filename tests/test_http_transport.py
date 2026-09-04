@@ -1,5 +1,6 @@
 """Transport-level tests for the streamable HTTP app."""
 import json
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -97,6 +98,102 @@ def test_stateless_mode_needs_no_session_id(app):
 def test_unknown_path_is_404(app):
     with TestClient(app) as c:
         assert c.get("/nope").status_code == 404
+
+
+class TestOriginValidation:
+    """DNS-rebinding defence. See OriginValidationMiddleware.
+
+    Host is deliberately NOT validated: cloudflared forwards
+    Host: <random>.trycloudflare.com, and a host allowlist would reject the
+    tunnel with a confusing 421.
+    """
+
+    def test_foreign_origin_is_rejected(self, app):
+        """A browser page on an attacker's domain must not reach the tools."""
+        with TestClient(app) as c:
+            r = c.post(
+                "/mcp",
+                json=TOOLS_LIST,
+                headers={**HEADERS, "Origin": "https://evil.example.com"},
+            )
+        assert r.status_code == 403, r.text
+
+    def test_request_with_no_origin_succeeds(self, app):
+        """Server-to-server is how Claude reaches this, tunnel or not.
+
+        Non-browser clients send no Origin header; blocking them would break
+        the whole transport.
+        """
+        with TestClient(app) as c:
+            r = c.post("/mcp", json=TOOLS_LIST, headers=HEADERS)
+        assert r.status_code == 200, r.text
+        assert "error" not in _payload(r)
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["http://localhost:6274", "http://127.0.0.1:8080", "http://[::1]:8080"],
+    )
+    def test_loopback_origins_are_allowed(self, origin):
+        """A same-machine browser tool (MCP Inspector) keeps working."""
+        with TestClient(build_app(MagicMock(), None)) as c:
+            r = c.post("/mcp", json=TOOLS_LIST, headers={**HEADERS, "Origin": origin})
+        assert r.status_code == 200, r.text
+
+    def test_explicitly_allowed_origin_is_accepted(self):
+        """--allowed-origin extends the allowlist beyond loopback."""
+        app = build_app(MagicMock(), None, allowed_origins=["https://app.example.com"])
+        with TestClient(app) as c:
+            r = c.post(
+                "/mcp",
+                json=TOOLS_LIST,
+                headers={**HEADERS, "Origin": "https://app.example.com"},
+            )
+        assert r.status_code == 200, r.text
+
+    def test_foreign_origin_is_rejected_on_healthz_too(self, app):
+        with TestClient(app) as c:
+            r = c.get("/healthz", headers={"Origin": "https://evil.example.com"})
+        assert r.status_code == 403
+
+
+def test_cli_allowed_origin_flag_is_repeatable_and_forwarded():
+    """`serve-http --allowed-origin A --allowed-origin B` reaches run_http."""
+    from paprika_mcp_server import cli
+
+    seen = {}
+
+    def _fake_run_http(host, port, allowed_origins):
+        seen.update(host=host, port=port, allowed_origins=allowed_origins)
+
+    argv = [
+        "paprika-mcp", "serve-http",
+        "--allowed-origin", "https://a.example.com",
+        "--allowed-origin", "https://b.example.com",
+    ]
+    with patch.object(sys, "argv", argv), \
+         patch("paprika_mcp_server.transports.http.run_http", _fake_run_http):
+        cli.main()
+
+    assert seen["allowed_origins"] == [
+        "https://a.example.com",
+        "https://b.example.com",
+    ]
+
+
+def test_cli_allowed_origin_defaults_to_none():
+    """No flag means loopback-only, which is what a tunnel needs."""
+    from paprika_mcp_server import cli
+
+    seen = {}
+
+    def _fake_run_http(host, port, allowed_origins):
+        seen.update(allowed_origins=allowed_origins)
+
+    with patch.object(sys, "argv", ["paprika-mcp", "serve-http"]), \
+         patch("paprika_mcp_server.transports.http.run_http", _fake_run_http):
+        cli.main()
+
+    assert seen["allowed_origins"] is None
 
 
 def test_run_http_closes_the_client_on_shutdown():
