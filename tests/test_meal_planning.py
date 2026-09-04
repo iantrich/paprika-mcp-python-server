@@ -98,11 +98,16 @@ class TestMealPlanningHelpers:
             client._parse_flexible_date("not a date at all")
 
     def test_format_date_readable(self, client):
-        """Test formatting date to readable format."""
+        """Readable dates carry weekday, month, day, and year."""
         result = client._format_date_readable("2025-11-03")
+        assert "Monday" in result
         assert "November" in result
+        assert "03" in result
         assert "2025" in result
-        assert "3" in result
+
+    def test_format_date_readable_passes_through_garbage(self, client):
+        """Unparseable input is returned unchanged rather than raising."""
+        assert client._format_date_readable("not a date") == "not a date"
 
     def test_get_next_free_day_empty_plan(self, client):
         """Test getting next free day with empty meal plan."""

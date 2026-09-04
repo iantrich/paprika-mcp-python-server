@@ -327,7 +327,7 @@ class PaprikaClient:
     def _format_date_readable(self, date_str: str) -> str:
         try:
             parsed = datetime.strptime(date_str, "%Y-%m-%d")
-            return parsed.strftime("%A, %B %d")
+            return parsed.strftime("%A, %B %d, %Y")
         except Exception:
             return date_str
 
