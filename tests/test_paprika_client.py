@@ -539,3 +539,53 @@ class TestGroceries:
                 mock_request.return_value = {"result": []}
                 result = await client.clear_grocery_list()
                 assert result is True
+
+
+class TestClearGroceryListWireFormat:
+    """clear_grocery_list's endpoint and payload, pinned.
+
+    Both were wrong and shipped: it POSTed to /groceries (404, so the tool
+    never worked) and marked rows quantity "0" without a delete flag, which
+    left every item on the list while reporting success. The pre-existing
+    test only asserted a call count, so neither was visible.
+    """
+
+    @pytest.mark.asyncio
+    async def test_clear_posts_to_sync_endpoint_with_deleted_flag(self):
+        from unittest.mock import AsyncMock, patch
+
+        client = PaprikaClient("test@example.com", "pw")
+        client.token = "t"
+
+        groceries = {
+            "result": [
+                {"uid": "g1", "name": "milk", "list_uid": "L1"},
+                {"uid": "g2", "name": "eggs", "list_uid": "L1"},
+            ]
+        }
+        captured = {}
+
+        def capture_gzip(payload):
+            captured["payload"] = payload
+            return b"gz"
+
+        with patch.object(
+            client, "_get_list_uuid_by_name", new_callable=AsyncMock, return_value="L1"
+        ), patch.object(
+            client, "_make_authenticated_request", new_callable=AsyncMock
+        ) as req, patch.object(client, "_gzip_json", side_effect=capture_gzip):
+            req.return_value = groceries
+            assert await client.clear_grocery_list() is True
+
+        posts = [c for c in req.call_args_list if c.args[0] == "POST"]
+        assert len(posts) == 1, "expected exactly one write"
+        assert posts[0].args[1] == "/sync/groceries", (
+            f"wrong endpoint {posts[0].args[1]!r}; /groceries returns 404"
+        )
+
+        assert len(captured["payload"]) == 2
+        for item in captured["payload"]:
+            assert item["deleted"] is True, (
+                "without deleted=True the row stays on the list and the tool "
+                "reports a success that did not happen"
+            )

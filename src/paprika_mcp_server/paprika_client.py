@@ -1842,6 +1842,9 @@ class PaprikaClient:
                         "F94467760BF4BC6B9521FFA9329D0F1DBCCA0F5AC0808BD8552FB375A565FB9E",
                     ),
                     "list_uid": list_uuid,
+                    # Paprika's sync API soft-deletes; quantity "0" alone
+                    # leaves the row on the list. Same flag remove_meal_from_plan uses.
+                    "deleted": True,
                 }
                 grocery_data_list.append(grocery_item)
 
@@ -1854,7 +1857,7 @@ class PaprikaClient:
                 content_type="application/octet-stream",
             )
 
-            await self._make_authenticated_request("POST", "/groceries", data=data)
+            await self._make_authenticated_request("POST", "/sync/groceries", data=data)
 
             logger.info(
                 f"Successfully cleared {len(groceries_to_delete)} items from grocery list"
