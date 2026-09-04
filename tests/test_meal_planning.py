@@ -62,6 +62,42 @@ class TestMealPlanningHelpers:
         with pytest.raises(MealNotFoundError):
             client._find_recipe_by_name("Pasta", [])
 
+    def test_find_recipe_ambiguous_when_no_confident_match(self, client):
+        """Several weak candidates must raise rather than silently pick one."""
+        recipes = [
+            {"name": "Pasta Bolognese", "uid": "123"},
+            {"name": "Pasta Carbonara", "uid": "456"},
+        ]
+        with pytest.raises(MealMatchAmbiguousError):
+            client._find_recipe_by_name("Pasta Bol", recipes)
+
+    def test_find_recipe_exact_match_wins_over_ambiguity(self, client):
+        """An exact name is never ambiguous, even among similar neighbours."""
+        recipes = [
+            {"name": "Pasta", "uid": "1"},
+            {"name": "Pasta Bolognese", "uid": "2"},
+            {"name": "Pasta Carbonara", "uid": "3"},
+        ]
+        assert client._find_recipe_by_name("Pasta", recipes)["uid"] == "1"
+
+    def test_find_recipe_single_weak_candidate_is_returned(self, client):
+        """With only one candidate there is nothing to be ambiguous between."""
+        recipes = [{"name": "Pasta Bolognese", "uid": "123"}]
+        assert client._find_recipe_by_name("Pasta Bol", recipes)["uid"] == "123"
+
+    def test_find_recipe_strong_match_wins(self, client):
+        """A near-exact match is confident enough to return despite neighbours."""
+        recipes = [
+            {"name": "Pasta Bolognese", "uid": "123"},
+            {"name": "Pasta Carbonara", "uid": "456"},
+        ]
+        assert client._find_recipe_by_name("Pasta Bolognes", recipes)["uid"] == "123"
+
+    def test_find_recipe_no_match_raises_not_found(self, client):
+        recipes = [{"name": "Pasta Bolognese", "uid": "123"}]
+        with pytest.raises(MealNotFoundError):
+            client._find_recipe_by_name("Beef Wellington", recipes)
+
     def test_parse_flexible_date_iso_format(self, client):
         """Test parsing ISO date format."""
         result = client._parse_flexible_date("2025-11-03")

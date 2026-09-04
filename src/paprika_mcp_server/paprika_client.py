@@ -16,6 +16,11 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+# A fuzzy name match at or above this ratio is confident enough to act on
+# without asking. Below it, more than one candidate means we refuse rather
+# than silently schedule the wrong recipe.
+STRONG_NAME_MATCH_RATIO = 0.85
+
 
 class PaprikaAPIError(Exception):
     """Custom exception for Paprika API errors."""
@@ -296,13 +301,14 @@ class PaprikaClient:
 
         matches.sort(key=lambda x: x[0], reverse=True)
 
-        if len(matches) > 1 and matches[0][0] == matches[1][0]:
+        best_ratio, best_recipe = matches[0]
+        if best_ratio < STRONG_NAME_MATCH_RATIO and len(matches) > 1:
             raise MealMatchAmbiguousError(
                 f"Multiple recipes match '{name}'",
                 matches=[m[1] for m in matches[:5]],
             )
 
-        return matches[0][1]
+        return best_recipe
 
     def _parse_flexible_date(self, date_str: str) -> str:
         """Parse a date string into "YYYY-MM-DD".
