@@ -1,10 +1,10 @@
 """Backwards-compatible entry point. The implementation lives in transports/."""
 import asyncio
-import logging
 
+# Importing paprika_mcp_server.transports (the package, before its stdio
+# submodule) configures INFO-level logging for all transports. See
+# transports/__init__.py.
 from paprika_mcp_server.transports.stdio import run_stdio
-
-logging.basicConfig(level=logging.INFO)
 
 
 async def main() -> None:

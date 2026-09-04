@@ -36,7 +36,11 @@ async def build_runtime() -> Tuple[PaprikaClient, Optional[ImageGenerator]]:
         password=config.paprika_password,
         image_generator=image_generator,
     )
-    await client.authenticate()
+    try:
+        await client.authenticate()
+    except Exception:
+        await client.close()
+        raise
     logger.info("Successfully authenticated with Paprika")
     return client, image_generator
 
