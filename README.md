@@ -1,6 +1,6 @@
 # 🌶️ Paprika MCP Server
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server that lets you talk to [Paprika Recipe Manager](https://www.paprikaapp.com/) through Claude Desktop. Just chat naturally to add recipes, find that thing you made last week, or update cooking times.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server that lets you talk to [Paprika Recipe Manager](https://www.paprikaapp.com/) through Claude Desktop. Just chat naturally to add recipes, manage your grocery lists, plan your meals, or find that thing you made last week.
 
 Oh, and it can generate food photos for your recipes too (using Flux from Black Forest Lab) if you want them to look fancy.
 
@@ -9,6 +9,8 @@ Oh, and it can generate food photos for your recipes too (using Flux from Black 
 ## What it does
 
 - **Just talk to add recipes** - No forms, no clicking around. Describe it and it's saved
+- **Manage grocery lists** - Add items, track quantities with units (e.g., "4 kilos", "3 liters"), and clear lists
+- **Plan your meals** - Add recipes to your meal plan with fuzzy name matching and flexible date parsing
 - **AI food photos** - Automatically generates images with Flux (~$0.002/image, totally optional)
 - **Find stuff fast** - Search by ingredient, cooking time, or just random words you remember
 - **Update anything** - Change one field or rewrite the whole thing
@@ -104,6 +106,26 @@ Regenerate the Carbonara image with rustic style and darker lighting
 Create a new photo with close-up view and more cheese visible
 ```
 
+**Grocery lists:**
+```
+What grocery lists do I have?
+What's on my grocery list?
+Add 3 kilos of bananas to my grocery list.
+How many bananas are on my grocery list?
+Subtract 2 kilos of sugar from my grocery list.
+```
+
+![Adding to grocery list](images/demo-add-to-grocerylist-cursor.png)
+
+**Meal planning:**
+```
+Add pasta bolognese to my meal plan for tomorrow
+Add the Spaghetti Carbonara recipe to the meal plan for 15 November
+Remove pasta bolognese from my meal plan
+What does my meal plan look like for the next 2 weeks?
+Show me all dinners planned for this week
+```
+
 ## CLI Commands
 
 Besides running as an MCP server, there are some handy commands:
@@ -165,17 +187,43 @@ The setup wizard (`paprika-mcp setup`) will find and configure any of these auto
 
 ## Available Tools
 
+### Recipes
+
 | Tool | Description |
 |------|-------------|
 | `create_recipe` | Create new recipes with auto-generated images (default) |
 | `update_recipe` | Update any fields while preserving the rest |
-| `list_recipes` | List recipes with pagination, sorting, and filtering |
+| `list_recipes` | List recipes with pagination, sorting, filtering, and last-planned date |
 | `read_recipe` | Get complete details for a single recipe |
 | `delete_recipe` | Move recipe to trash (requires confirmation) |
 | `search_recipes` | Search by text across all recipe fields |
 | `filter_recipes_by_ingredient` | Find recipes containing specific ingredients |
 | `filter_recipes_by_time` | Filter by prep time or cook time constraints |
 | `regenerate_recipe_image` | Generate new AI photos with custom styling |
+
+### Meal Planning
+
+| Tool | Description |
+|------|-------------|
+| `add_meal_to_plan` | Add a meal to the meal plan with fuzzy recipe matching and flexible date parsing |
+| `remove_meal_from_plan` | Remove a meal from the meal plan (defaults to latest if no args) |
+| `list_meal_plan` | List meal plan entries with optional type and day-count filtering |
+
+### Groceries
+
+| Tool | Description |
+|------|-------------|
+| `get_grocery_lists` | Get all grocery list names from your Paprika account |
+| `get_groceries` | Get all groceries from a grocery list (defaults to default list) |
+| `get_grocery` | Get a specific grocery item by name with its quantity |
+| `add_grocery` | Add or update a grocery item. Supports quantities with units (e.g., "3 kilos") and negative values for subtraction |
+| `clear_grocery_list` | Clear all items from a grocery list |
+
+**Note on Quantities**: The `add_grocery` tool supports:
+- Simple numbers: `1`, `3`, `-2`
+- Quantities with units: `"3 kilos"`, `"4 liters"`, `"-2 kilos"`
+- Automatic unit preservation when adding to existing items
+- Error handling if subtraction would result in negative quantity
 
 ## Advanced Features
 
