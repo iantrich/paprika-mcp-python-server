@@ -1,62 +1,20 @@
-"""Dump the MCP tool schemas registered by server.main() to JSON.
+"""Dump the MCP tool schemas to JSON.
 
-The tool definitions live inside main(), so they cannot simply be imported.
-This runs main() far enough to register them, with authentication stubbed
-out and the transport short-circuited, then serialises what was registered.
+The definitions now live in paprika_mcp_server.core.tools, so they can be
+imported directly — no need to run main() with authentication stubbed out.
+Serialisation is unchanged, so the output is comparable to snapshots taken
+before the extraction.
 """
-import asyncio
 import json
-import os
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-os.environ.setdefault("PAPRIKA_USERNAME", "snapshot@example.com")
-os.environ.setdefault("PAPRIKA_PASSWORD", "snapshot")
-os.environ.pop("REPLICATE_API_TOKEN", None)
-
-import paprika_mcp_server.server as srv  # noqa: E402
-
-
-class _StopBeforeTransport(Exception):
-    """Raised to unwind main() once the handlers are registered."""
+from paprika_mcp_server.core.tools import TOOLS
 
 
 def capture():
-    captured = {}
-    original_list_tools = srv.server.list_tools
-
-    def capturing_list_tools():
-        real_decorator = original_list_tools()
-
-        def wrapper(fn):
-            captured["list_tools"] = fn
-            return real_decorator(fn)
-
-        return wrapper
-
-    srv.server.list_tools = capturing_list_tools
-
-    def _boom(*args, **kwargs):
-        raise _StopBeforeTransport()
-
-    async def _run():
-        with patch.object(
-            srv.PaprikaClient, "authenticate", new_callable=AsyncMock
-        ), patch.object(srv, "stdio_server", _boom):
-            try:
-                await srv.main()
-            except _StopBeforeTransport:
-                pass
-
-    asyncio.run(_run())
-
-    if "list_tools" not in captured:
-        raise SystemExit("list_tools handler was never registered")
-
-    tools = asyncio.run(captured["list_tools"]())
     return sorted(
-        (t.model_dump(mode="json", exclude_none=True) for t in tools),
+        (t.model_dump(mode="json", exclude_none=True) for t in TOOLS),
         key=lambda d: d["name"],
     )
 

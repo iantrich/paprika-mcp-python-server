@@ -40,3 +40,29 @@ def test_every_tool_has_a_description_and_object_schema():
     for tool in schemas:
         assert tool.get("description"), f"{tool['name']} has no description"
         assert tool["inputSchema"]["type"] == "object", tool["name"]
+
+
+def test_every_tool_declares_its_arguments():
+    """A fixture with emptied properties must not be able to pass this file."""
+    schemas = json.loads(FIXTURE.read_text())
+    for tool in schemas:
+        properties = tool["inputSchema"].get("properties")
+        assert isinstance(properties, dict), tool["name"]
+        if tool["name"] != "get_grocery_lists":
+            # get_grocery_lists legitimately takes no arguments.
+            assert properties, f"{tool['name']} declares no properties"
+        for required in tool["inputSchema"].get("required", []):
+            assert required in properties, (
+                f"{tool['name']} requires '{required}' but does not declare it"
+            )
+
+
+def test_extracted_tools_match_the_snapshot_exactly():
+    """core.tools.TOOLS must reproduce the pre-refactor surface byte for byte."""
+    from paprika_mcp_server.core.tools import TOOLS
+
+    extracted = sorted(
+        (t.model_dump(mode="json", exclude_none=True) for t in TOOLS),
+        key=lambda d: d["name"],
+    )
+    assert extracted == json.loads(FIXTURE.read_text())
