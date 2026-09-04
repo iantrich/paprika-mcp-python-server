@@ -32,6 +32,7 @@ dependencies = [
     "aiohttp>=3.12.0",
     "pydantic>=2.11.0",
     "python-dotenv>=1.1.0",
+    "python-dateutil>=2.8.2",
     "replicate>=0.22.0",
 ]
 
