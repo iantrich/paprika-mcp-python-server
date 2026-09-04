@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import gzip
 import hashlib
@@ -73,6 +74,14 @@ class PaprikaClient:
         """
         self.username = username
         self.password = password
+        # uid -> (index hash, recipe data). The /sync/recipes index carries only
+        # {uid, hash}, so any question about recipe names means fetching each one
+        # individually. The hash is the API's own change token: unchanged hash
+        # means unchanged recipe, so it can be served from here instead.
+        self._recipe_cache: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        # Serialises cache fills so two concurrent callers on a cold cache do not
+        # both walk the whole library.
+        self._recipe_cache_lock = asyncio.Lock()
         self.token: Optional[str] = None
         self.session: Optional[aiohttp.ClientSession] = None
         self.image_generator = image_generator
@@ -548,6 +557,75 @@ class PaprikaClient:
             logger.error(f"Failed to get recipe by UID {uid}: {str(e)}")
             return None
 
+    async def _load_recipes_from_index(
+        self,
+        index_entries: List[Dict[str, Any]],
+        prune: bool = False,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Resolve /sync/recipes index entries to full recipe bodies.
+
+        Only recipes whose index hash differs from the cached one are fetched.
+        An unchanged library therefore costs a single index request instead of
+        one request per recipe, which is what made create_recipe and
+        list_recipes rate-limit an account of any size.
+
+        Freshness comes from the index, which is always fetched live by the
+        caller: a recipe edited on another device arrives with a new hash and
+        is re-fetched. A stale entry cannot be served, because entries are only
+        consulted when their uid appears in the current index.
+
+        Args:
+            index_entries: entries from GET /sync/recipes, each {uid, hash}
+            prune: drop cached uids absent from index_entries. Only pass True
+                when index_entries is the COMPLETE index; pruning against a
+                truncated slice would evict live entries.
+
+        Returns:
+            uid -> recipe data, skipping any recipe that failed to fetch.
+        """
+        async with self._recipe_cache_lock:
+            if prune:
+                live = {e["uid"] for e in index_entries}
+                for gone in self._recipe_cache.keys() - live:
+                    del self._recipe_cache[gone]
+
+            resolved: Dict[str, Dict[str, Any]] = {}
+            fetched = 0
+            for entry in index_entries:
+                uid = entry["uid"]
+                entry_hash = entry.get("hash")
+
+                cached = self._recipe_cache.get(uid)
+                if cached is not None and entry_hash is not None and cached[0] == entry_hash:
+                    resolved[uid] = cached[1]
+                    continue
+
+                try:
+                    recipe_response = await self._make_authenticated_request(
+                        "GET", f"/sync/recipe/{uid}/"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to fetch recipe {uid}: {str(e)}")
+                    continue
+
+                recipe_data = recipe_response.get("result", {})
+                if not isinstance(recipe_data, dict):
+                    # Matches the pre-cache behaviour: a malformed recipe body
+                    # is skipped rather than failing the whole listing.
+                    logger.warning(f"Unexpected payload for recipe {uid}; skipping")
+                    continue
+
+                fetched += 1
+                if entry_hash is not None:
+                    self._recipe_cache[uid] = (entry_hash, recipe_data)
+                resolved[uid] = recipe_data
+
+            logger.info(
+                f"Resolved {len(resolved)} recipes "
+                f"({fetched} fetched, {len(resolved) - fetched} from cache)"
+            )
+            return resolved
+
     async def get_recipe_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """
         Get a single recipe by exact title match (case-sensitive).
@@ -569,28 +647,22 @@ class PaprikaClient:
             if not recipe_list:
                 return None
 
+            # recipe_list is the complete index here, so the cache can be pruned.
+            recipes = await self._load_recipes_from_index(recipe_list, prune=True)
+
             # Search for recipe with matching title
             for recipe_info in recipe_list:
-                uid = recipe_info["uid"]
-
-                try:
-                    recipe_response = await self._make_authenticated_request(
-                        "GET", f"/sync/recipe/{uid}/"
-                    )
-
-                    recipe_data = recipe_response.get("result", {})
-
-                    # Check for exact title match (case-sensitive) and not in trash
-                    if (
-                        recipe_data.get("name") == title
-                        and not recipe_data.get("in_trash", False)
-                    ):
-                        logger.info(f"Successfully found recipe by title: {title}")
-                        return recipe_data
-
-                except Exception as e:
-                    logger.warning(f"Failed to fetch recipe {uid}: {str(e)}")
+                recipe_data = recipes.get(recipe_info["uid"])
+                if recipe_data is None:
                     continue
+
+                # Check for exact title match (case-sensitive) and not in trash
+                if (
+                    recipe_data.get("name") == title
+                    and not recipe_data.get("in_trash", False)
+                ):
+                    logger.info(f"Successfully found recipe by title: {title}")
+                    return recipe_data
 
             logger.info(f"No recipe found with title: {title}")
             return None
@@ -1126,28 +1198,24 @@ class PaprikaClient:
 
             recipe_list = recipe_list[:limit]
 
+            # recipe_list was truncated to `limit` above, so it is NOT the
+            # complete index and must not be used to prune the cache.
+            resolved = await self._load_recipes_from_index(recipe_list, prune=False)
+
             recipes = []
             for recipe_info in recipe_list:
                 uid = recipe_info["uid"]
-
-                try:
-                    recipe_response = await self._make_authenticated_request(
-                        "GET", f"/sync/recipe/{uid}/"
-                    )
-
-                    recipe_data = recipe_response.get("result", {})
-
-                    if recipe_data.get("in_trash", False):
-                        continue
-
-                    if uid in recipe_last_planned:
-                        recipe_data["last_planned"] = recipe_last_planned[uid]
-
-                    recipes.append(recipe_data)
-
-                except Exception as e:
-                    logger.warning(f"Failed to fetch recipe {uid}: {str(e)}")
+                recipe_data = resolved.get(uid)
+                if recipe_data is None:
                     continue
+
+                if recipe_data.get("in_trash", False):
+                    continue
+
+                if uid in recipe_last_planned:
+                    recipe_data["last_planned"] = recipe_last_planned[uid]
+
+                recipes.append(recipe_data)
 
             logger.info(f"Successfully fetched {len(recipes)} recipes")
             return recipes
