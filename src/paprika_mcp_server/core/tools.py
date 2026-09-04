@@ -171,28 +171,6 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="delete_recipe",
-        description="Delete a recipe from Paprika by moving it to trash. REQUIRES CONFIRMATION. Provide either uid or title to identify the recipe, then call again with confirm=true to proceed with deletion.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "uid": {
-                    "type": "string",
-                    "description": "The UID of the recipe to delete (optional if title provided)",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "The title of the recipe to delete (optional if uid provided)",
-                },
-                "confirm": {
-                    "type": "boolean",
-                    "description": "Must be set to true to confirm deletion. Without this, only shows what will be deleted.",
-                },
-            },
-            "required": ["confirm"],
-        },
-    ),
-    Tool(
         name="regenerate_recipe_image",
         description="Regenerate AI food photography for an existing recipe with optional custom styling instructions. Cost: ~$0.002 per generation. Requires REPLICATE_API_TOKEN to be configured.",
         inputSchema={

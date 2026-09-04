@@ -14,7 +14,6 @@ EXPECTED_TOOL_NAMES = [
     "add_meal_to_plan",
     "clear_grocery_list",
     "create_recipe",
-    "delete_recipe",
     "filter_recipes_by_ingredient",
     "filter_recipes_by_time",
     "get_groceries",

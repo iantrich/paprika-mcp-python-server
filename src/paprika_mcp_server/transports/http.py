@@ -61,7 +61,7 @@ class OriginValidationMiddleware:
       * anything else  -> 403, unless named via --allowed-origin.
 
     Without this, a DNS-rebinding attack can make an attacker's page
-    same-origin with 127.0.0.1:8080 and reach delete_recipe /
+    same-origin with 127.0.0.1:8080 and reach
     clear_grocery_list, which are unauthenticated in this phase.
     """
 

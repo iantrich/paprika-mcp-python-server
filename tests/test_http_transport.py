@@ -64,7 +64,7 @@ def test_mcp_path_is_not_a_redirect(app, path):
 
 
 @pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
-def test_tools_list_over_http_returns_all_17_tools(app, path):
+def test_tools_list_over_http_returns_all_tools(app, path):
     """End-to-end through ASGI + session manager + MCP protocol layer.
 
     Exercises the real request path without Paprika credentials: the client is
@@ -81,7 +81,7 @@ def test_tools_list_over_http_returns_all_17_tools(app, path):
         assert "error" not in data, data
         names = [t["name"] for t in data["result"]["tools"]]
 
-    assert len(names) == 17, names
+    assert len(names) == 16, names
     assert sorted(names) == sorted(t.name for t in TOOLS)
 
 

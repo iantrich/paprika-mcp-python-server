@@ -125,30 +125,6 @@
     "name": "create_recipe"
   },
   {
-    "description": "Delete a recipe from Paprika by moving it to trash. REQUIRES CONFIRMATION. Provide either uid or title to identify the recipe, then call again with confirm=true to proceed with deletion.",
-    "inputSchema": {
-      "properties": {
-        "confirm": {
-          "description": "Must be set to true to confirm deletion. Without this, only shows what will be deleted.",
-          "type": "boolean"
-        },
-        "title": {
-          "description": "The title of the recipe to delete (optional if uid provided)",
-          "type": "string"
-        },
-        "uid": {
-          "description": "The UID of the recipe to delete (optional if title provided)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "confirm"
-      ],
-      "type": "object"
-    },
-    "name": "delete_recipe"
-  },
-  {
     "description": "Filter recipes by specific ingredients",
     "inputSchema": {
       "properties": {

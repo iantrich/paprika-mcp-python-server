@@ -156,7 +156,7 @@ paprika-mcp serve-http
 ## HTTP transport (`serve-http`)
 
 Most clients launch the server over stdio and you never think about it.
-`serve-http` instead serves the same 17 tools over streamable HTTP at
+`serve-http` instead serves the same 16 tools over streamable HTTP at
 `POST /mcp`, so a remote agent can reach it. There is also a `GET /healthz`.
 
 ```bash
@@ -228,7 +228,6 @@ The setup wizard (`paprika-mcp setup`) will find and configure any of these auto
 | `update_recipe` | Update any fields while preserving the rest |
 | `list_recipes` | List recipes with pagination, sorting, filtering, and last-planned date |
 | `read_recipe` | Get complete details for a single recipe |
-| `delete_recipe` | Move recipe to trash (requires confirmation) |
 | `search_recipes` | Search by text across all recipe fields |
 | `filter_recipes_by_ingredient` | Find recipes containing specific ingredients |
 | `filter_recipes_by_time` | Filter by prep time or cook time constraints |
