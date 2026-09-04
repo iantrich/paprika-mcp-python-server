@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # than silently schedule the wrong recipe.
 STRONG_NAME_MATCH_RATIO = 0.85
 
+# Two candidates whose similarity differs by less than this are not
+# meaningfully distinguishable; refuse rather than pick one.
+AMBIGUOUS_MATCH_MARGIN = 0.05
+
 
 class PaprikaAPIError(Exception):
     """Custom exception for Paprika API errors."""
@@ -302,11 +306,21 @@ class PaprikaClient:
         matches.sort(key=lambda x: x[0], reverse=True)
 
         best_ratio, best_recipe = matches[0]
-        if best_ratio < STRONG_NAME_MATCH_RATIO and len(matches) > 1:
-            raise MealMatchAmbiguousError(
-                f"Multiple recipes match '{name}'",
-                matches=[m[1] for m in matches[:5]],
-            )
+        if len(matches) > 1:
+            runner_up_ratio = matches[1][0]
+            # Refuse both when nothing is a confident match AND when the top
+            # two are so close that picking the higher one is a coin flip
+            # (e.g. "Chicken Curr" against "Chicken Curry" and
+            # "Chicken Currys"). A strong best score is not on its own a
+            # reason to act when an equally strong runner-up exists.
+            if (
+                best_ratio < STRONG_NAME_MATCH_RATIO
+                or (best_ratio - runner_up_ratio) < AMBIGUOUS_MATCH_MARGIN
+            ):
+                raise MealMatchAmbiguousError(
+                    f"Multiple recipes match '{name}'",
+                    matches=[m[1] for m in matches[:5]],
+                )
 
         return best_recipe
 
@@ -1460,7 +1474,10 @@ class PaprikaClient:
         if not meal and not meal_id and not date:
             sorted_plan = sorted(
                 current_plan,
-                key=lambda x: (x.get("date", ""), x.get("type", "").lower() != meal_type.lower()),
+                # reverse=True sorts True first, so the key must be True for
+                # the entry whose type MATCHES: with `!=` the sort actively
+                # preferred the wrong meal type and deleted it.
+                key=lambda x: (x.get("date", ""), x.get("type", "").lower() == meal_type.lower()),
                 reverse=True,
             )
             meal_to_remove = sorted_plan[0]
@@ -1567,6 +1584,10 @@ class PaprikaClient:
                 "type": entry_type,
             }
 
+        except (MealNotFoundError, MealMatchAmbiguousError):
+            # These carry information the handler layer maps to a specific
+            # message; wrapping them in PaprikaAPIError below would hide it.
+            raise
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Failed to remove meal from plan: {error_msg}")

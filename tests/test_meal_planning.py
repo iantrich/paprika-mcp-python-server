@@ -93,6 +93,20 @@ class TestMealPlanningHelpers:
         ]
         assert client._find_recipe_by_name("Pasta Bolognes", recipes)["uid"] == "123"
 
+    def test_find_recipe_two_strong_candidates_are_ambiguous(self, client):
+        """A strong best score is not enough when the runner-up is just as
+        strong. "Chicken Curr" scores 0.96 against "Chicken Curry" and 0.92
+        against "Chicken Currys" -- a 0.037 gap. The old guard only checked
+        `best_ratio < STRONG_NAME_MATCH_RATIO`, so it silently returned
+        "Chicken Curry" and this tool writes data."""
+        recipes = [
+            {"name": "Chicken Curry", "uid": "a"},
+            {"name": "Chicken Currys", "uid": "b"},
+        ]
+        with pytest.raises(MealMatchAmbiguousError) as exc_info:
+            client._find_recipe_by_name("Chicken Curr", recipes)
+        assert {m["uid"] for m in exc_info.value.matches} == {"a", "b"}
+
     def test_find_recipe_no_match_raises_not_found(self, client):
         recipes = [{"name": "Pasta Bolognese", "uid": "123"}]
         with pytest.raises(MealNotFoundError):
@@ -193,6 +207,10 @@ class TestMealPlanningAPI:
             mock_request.return_value = mock_response
             result = await client.get_meal_plan(num_days=10, meal_type="dinner")
             assert len(result) == 1
+            # recipe_name -> meal and recipe_uid -> meal_ID is the mapping
+            # remove_meal_from_plan() matches entries on; assert it here.
+            assert result[0]["meal"] == "Pasta Bolognese"
+            assert result[0]["meal_ID"] == "123"
             assert result[0]["date"] == target
 
     @pytest.mark.asyncio
@@ -418,4 +436,72 @@ class TestMealPlanningAPI:
                 result = await client.remove_meal_from_plan()
 
                 assert result["result"] == "Meal removed"
+
+    @pytest.mark.asyncio
+    async def test_remove_meal_from_plan_no_params_prefers_matching_type(self, client):
+        """With two entries on the SAME date, the default meal_type must win.
+
+        The tie-break sorted on `type != meal_type` with reverse=True, and
+        True sorts first under reverse -- so it actively preferred the entry
+        whose type did NOT match and deleted the wrong meal. A single-entry
+        plan cannot catch this.
+        """
+        date = "2026-09-10"
+        meal_plan_mock = [
+            {"meal": "Lasagna", "meal_ID": "d1", "date": date, "type": "dinner"},
+            {"meal": "Soup", "meal_ID": "l1", "date": date, "type": "lunch"},
+        ]
+
+        with patch.object(client, "get_meal_plan", new_callable=AsyncMock) as mock_get_plan:
+            mock_get_plan.return_value = meal_plan_mock
+
+            api_response_mock = {
+                "result": [
+                    {"uid": "mp-d1", "recipe_uid": "d1", "date": f"{date} 00:00:00", "type": 2},
+                    {"uid": "mp-l1", "recipe_uid": "l1", "date": f"{date} 00:00:00", "type": 3},
+                ]
+            }
+
+            with patch.object(
+                client, "_make_v1_basic_auth_request", new_callable=AsyncMock
+            ) as mock_request:
+                mock_request.side_effect = [api_response_mock, {"result": "deleted"}]
+
+                result = await client.remove_meal_from_plan()
+
+        assert result["meal"] == "Lasagna", "removed the wrong meal type"
+        assert result["type"] == "dinner"
+        assert result["meal_ID"] == "d1"
+
+    @pytest.mark.asyncio
+    async def test_remove_meal_missing_entry_raises_meal_not_found(self, client):
+        """MealNotFoundError must escape unwrapped.
+
+        It is raised inside the try: block whose `except Exception` turns
+        everything into PaprikaAPIError, so handlers.py's `except
+        MealNotFoundError` never fired and the agent saw a generic error.
+        """
+        date = "2026-09-10"
+        meal_plan_mock = [
+            {"meal": "Lasagna", "meal_ID": "d1", "date": date, "type": "dinner"},
+        ]
+
+        with patch.object(client, "get_meal_plan", new_callable=AsyncMock) as mock_get_plan:
+            mock_get_plan.return_value = meal_plan_mock
+
+            # The sync feed has no entry matching that uid/date/type, so the
+            # lookup falls through to "Meal plan entry not found for deletion".
+            api_response_mock = {
+                "result": [
+                    {"uid": "mp-x", "recipe_uid": "other", "date": f"{date} 00:00:00", "type": 2},
+                ]
+            }
+
+            with patch.object(
+                client, "_make_v1_basic_auth_request", new_callable=AsyncMock
+            ) as mock_request:
+                mock_request.return_value = api_response_mock
+
+                with pytest.raises(MealNotFoundError):
+                    await client.remove_meal_from_plan()
 
