@@ -38,7 +38,11 @@ def get_config() -> Config:
     parser.add_argument("--password", help="Paprika account password")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
-    args = parser.parse_args()
+    # parse_known_args, not parse_args: get_config() is called from inside
+    # subcommands (e.g. `paprika-mcp serve-http --host ... --port ...`), and
+    # this parser only knows about credentials. parse_args() would treat the
+    # subcommand's own flags as unrecognised and exit.
+    args, _ = parser.parse_known_args()
 
     # Get credentials from args, environment, or prompt
     username = (
