@@ -22,6 +22,20 @@ def run_server() -> None:
         sys.exit(1)
 
 
+def serve_http(host: str = "127.0.0.1", port: int = 8080) -> None:
+    """Run the MCP server over streamable HTTP."""
+    from paprika_mcp_server.transports.http import run_http
+
+    try:
+        run_http(host=host, port=port)
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error starting server: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def setup_wizard() -> None:
     """Run interactive setup wizard."""
     from paprika_mcp_server.setup_wizard import run_setup
@@ -141,6 +155,22 @@ def main() -> NoReturn:
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    # Serve over streamable HTTP
+    serve_http_parser = subparsers.add_parser(
+        "serve-http", help="Run the MCP server over streamable HTTP"
+    )
+    serve_http_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Interface to bind (default: 127.0.0.1, loopback only)",
+    )
+    serve_http_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to listen on (default: 8080)",
+    )
+
     # Setup command
     setup_parser = subparsers.add_parser(
         "setup", help="Interactive setup wizard for first-time configuration"
@@ -161,7 +191,9 @@ def main() -> NoReturn:
     args = parser.parse_args()
 
     # Route to appropriate command
-    if args.command == "setup":
+    if args.command == "serve-http":
+        serve_http(host=args.host, port=args.port)
+    elif args.command == "setup":
         setup_wizard()
     elif args.command == "config":
         reconfigure()
