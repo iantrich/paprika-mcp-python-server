@@ -52,23 +52,29 @@ def test_mcp_endpoint_accepts_initialize(app):
         assert r.status_code == 200
 
 
-def test_mcp_path_is_not_a_redirect(app):
-    """A Mount would 307 here and drop the body and Authorization header."""
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_mcp_path_is_not_a_redirect(app, path):
+    """Neither spelling may redirect: a 307 drops the body and Authorization
+    header. A Mount would 307 "/mcp" -> "/mcp/"; a single Route with
+    redirect_slashes (the Starlette default) would 307 "/mcp/" -> "/mcp"."""
     with TestClient(app, follow_redirects=False) as c:
-        r = c.post("/mcp", json=INIT, headers=HEADERS)
-        assert r.status_code != 307, "POST /mcp is redirecting; use Route, not Mount"
+        r = c.post(path, json=INIT, headers=HEADERS)
+        assert r.status_code != 307, f"POST {path} is redirecting"
 
 
-def test_tools_list_over_http_returns_all_17_tools(app):
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_tools_list_over_http_returns_all_17_tools(app, path):
     """End-to-end through ASGI + session manager + MCP protocol layer.
 
     Exercises the real request path without Paprika credentials: the client is
-    a MagicMock, and tools/list never touches it.
+    a MagicMock, and tools/list never touches it. Parametrized over both path
+    spellings so "/mcp/" is proven to actually reach the session manager, not
+    just to avoid a 307.
     """
     from paprika_mcp_server.core.tools import TOOLS
 
     with TestClient(app) as c:
-        r = c.post("/mcp", json=TOOLS_LIST, headers=HEADERS)
+        r = c.post(path, json=TOOLS_LIST, headers=HEADERS)
         assert r.status_code == 200, r.text
         data = _payload(r)
         assert "error" not in data, data

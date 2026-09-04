@@ -64,6 +64,7 @@ def build_app(
         stateless=True,
         json_response=True,
     )
+    mcp_endpoint = _MCPEndpoint(session_manager)
 
     async def healthz(request):
         return JSONResponse({"status": "ok"})
@@ -76,12 +77,26 @@ def build_app(
 
     return Starlette(
         routes=[
-            # Route, never Mount. Measured: Mount("/mcp", ...) answers a POST
-            # to /mcp with 307 -> /mcp/, and the redirect drops the POST body
-            # and the Authorization header, which presents as an auth failure.
+            # Two routes, same _MCPEndpoint instance (same session_manager),
+            # to dodge two different redirects. Measured against this app:
+            #   Mount("/mcp", ...) answers POST /mcp with 307 -> /mcp/.
+            #   A single Route("/mcp", ...) answers POST /mcp/ with
+            #     307 -> /mcp (Starlette's redirect_slashes is on by default
+            #     and there is no supported way to turn it off here:
+            #     Starlette(..., redirect_slashes=False) raises TypeError).
+            # Either direction drops the POST body and the Authorization
+            # header on the redirect, which is a silent MCP failure today and
+            # will present as a confusing auth failure once OAuth lands. Do
+            # not delete the second route as "redundant" -- it is what stops
+            # the second redirect.
             Route(
                 "/mcp",
-                endpoint=_MCPEndpoint(session_manager),
+                endpoint=mcp_endpoint,
+                methods=["POST", "GET", "DELETE"],
+            ),
+            Route(
+                "/mcp/",
+                endpoint=mcp_endpoint,
                 methods=["POST", "GET", "DELETE"],
             ),
             Route("/healthz", endpoint=healthz, methods=["GET"]),
