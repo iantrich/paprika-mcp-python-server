@@ -3,9 +3,14 @@ import gzip
 import hashlib
 import json
 import logging
+import re
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+from difflib import SequenceMatcher
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from dateutil import parser as date_parser
 
 import aiohttp
 
@@ -22,6 +27,20 @@ class ValidationError(Exception):
     """Custom exception for input validation errors."""
 
     pass
+
+
+class MealNotFoundError(Exception):
+    """Exception raised when a meal/recipe cannot be found."""
+
+    pass
+
+
+class MealMatchAmbiguousError(Exception):
+    """Exception raised when multiple potential meal matches are found."""
+
+    def __init__(self, message: str, matches: List[Dict[str, Any]]):
+        super().__init__(message)
+        self.matches = matches
 
 
 class PaprikaClient:
@@ -152,6 +171,38 @@ class PaprikaClient:
         except aiohttp.ClientError as e:
             raise PaprikaAPIError(f"Network error: {str(e)}")
 
+    async def _make_v1_basic_auth_request(
+        self, method: str, endpoint: str, **kwargs
+    ) -> Dict[str, Any]:
+        """Make a v1 API request with HTTP Basic Auth (used for meal plan endpoints)."""
+        session = await self._get_session()
+        headers = kwargs.pop("headers", {})
+
+        credentials = f"{self.username}:{self.password}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        headers["Authorization"] = f"Basic {encoded_credentials}"
+
+        try:
+            async with session.request(
+                method, f"{self.BASE_URL}/v1{endpoint}", headers=headers, **kwargs
+            ) as response:
+                if response.status not in (200, 201, 204):
+                    error_text = await response.text()
+                    raise PaprikaAPIError(
+                        f"Request failed with status {response.status}: {error_text}"
+                    )
+
+                if response.status == 204:
+                    return {}
+
+                try:
+                    return await response.json()
+                except aiohttp.ContentTypeError:
+                    return {}
+
+        except aiohttp.ClientError as e:
+            raise PaprikaAPIError(f"Network error: {str(e)}")
+
     def _generate_uuid(self) -> str:
         """Generate a new uppercase UUID."""
         return str(uuid.uuid4()).upper()
@@ -170,6 +221,120 @@ class PaprikaClient:
         data = {k: v for k, v in recipe_dict.items() if k != "hash"}
         json_str = json.dumps(data, sort_keys=True)
         return hashlib.sha256(json_str.encode()).hexdigest()
+
+    def _parse_quantity(self, quantity_str: str) -> Tuple[float, Optional[str]]:
+        if not quantity_str or not isinstance(quantity_str, str):
+            return (0.0, None)
+
+        quantity_str = quantity_str.strip()
+        if not quantity_str:
+            return (0.0, None)
+
+        match = re.match(r"^(-?\d+\.?\d*)\s*(.*)$", quantity_str)
+        if match:
+            numeric_value = float(match.group(1))
+            unit = match.group(2).strip() if match.group(2) else None
+            return (numeric_value, unit if unit else None)
+
+        try:
+            return (float(quantity_str), None)
+        except ValueError:
+            return (0.0, None)
+
+    def _add_quantities(self, quantity1: str, quantity2: str) -> Tuple[str, bool]:
+        if not isinstance(quantity1, str):
+            quantity1 = str(quantity1)
+        if not isinstance(quantity2, str):
+            quantity2 = str(quantity2)
+
+        value1, unit1 = self._parse_quantity(quantity1)
+        value2, unit2 = self._parse_quantity(quantity2)
+
+        result_unit = unit1 if unit1 else unit2
+        result_value = value1 + value2
+
+        if result_value < 0:
+            raise PaprikaAPIError(
+                f"Cannot subtract {quantity2} from {quantity1}: result would be negative"
+            )
+
+        if result_unit:
+            if result_value == 1.0 and result_unit.endswith("s"):
+                display_unit = result_unit[:-1]
+            else:
+                display_unit = result_unit
+            if result_value == int(result_value):
+                result_str = f"{int(result_value)} {display_unit}"
+            else:
+                result_str = f"{result_value} {display_unit}"
+        else:
+            if result_value == int(result_value):
+                result_str = str(int(result_value))
+            else:
+                result_str = str(result_value)
+
+        return (result_str, True)
+
+    def _find_recipe_by_name(
+        self, name: str, recipes: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        name_lower = name.lower()
+
+        for recipe in recipes:
+            if recipe.get("name", "").lower() == name_lower:
+                return recipe
+
+        matches = []
+        for recipe in recipes:
+            recipe_name = recipe.get("name", "").lower()
+            ratio = SequenceMatcher(None, name_lower, recipe_name).ratio()
+            if ratio > 0.6 or name_lower in recipe_name:
+                matches.append((ratio, recipe))
+
+        if not matches:
+            raise MealNotFoundError(f"No recipe found matching '{name}'")
+
+        matches.sort(key=lambda x: x[0], reverse=True)
+
+        if len(matches) > 1 and matches[0][0] == matches[1][0]:
+            raise MealMatchAmbiguousError(
+                f"Multiple recipes match '{name}'",
+                matches=[m[1] for m in matches[:5]],
+            )
+
+        return matches[0][1]
+
+    def _parse_flexible_date(self, date_str: str) -> str:
+        try:
+            parsed = date_parser.parse(date_str, dayfirst=True)
+            return parsed.strftime("%Y-%m-%d")
+        except Exception as e:
+            raise ValueError(f"Cannot parse date '{date_str}': {str(e)}")
+
+    def _format_date_readable(self, date_str: str) -> str:
+        try:
+            parsed = datetime.strptime(date_str, "%Y-%m-%d")
+            return parsed.strftime("%A, %B %d")
+        except Exception:
+            return date_str
+
+    def _get_next_free_day(
+        self, current_plan: List[Dict[str, Any]], meal_type: str = "dinner"
+    ) -> str:
+        planned_dates = set()
+        for entry in current_plan:
+            if entry.get("type", "").lower() == meal_type.lower():
+                planned_dates.add(entry.get("date", ""))
+
+        today = datetime.now().date()
+        candidate = today + timedelta(days=1)
+        for _ in range(365):
+            candidate_str = candidate.strftime("%Y-%m-%d")
+            if candidate_str not in planned_dates:
+                return candidate_str
+            candidate += timedelta(days=1)
+
+        return (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
     def _gzip_json(self, data: Dict[str, Any]) -> bytes:
         """
@@ -885,7 +1050,8 @@ class PaprikaClient:
 
     async def list_recipes(self, limit: int = 50) -> List[Dict[str, Any]]:
         """
-        List recipes from Paprika.
+        List recipes from Paprika. Each recipe may include a last_planned date
+        (YYYY-MM-DD) if it appears in the meal plan history.
 
         Args:
             limit: Maximum number of recipes to return
@@ -897,6 +1063,27 @@ class PaprikaClient:
             PaprikaAPIError: If listing fails
         """
         try:
+            # Fetch meal plan history to compute last_planned dates
+            meal_plan = []
+            try:
+                today = datetime.now().date()
+                start_date = (today - timedelta(days=366)).strftime("%Y-%m-%d")
+                end_date = today.strftime("%Y-%m-%d")
+                meal_plan = await self.get_meal_plan(
+                    start_date=start_date, end_date=end_date, meal_type=None
+                )
+            except Exception as e:
+                logger.warning(f"Failed to fetch meal plan for last_planned: {str(e)}")
+
+            recipe_last_planned: Dict[str, str] = {}
+            for meal_entry in meal_plan:
+                meal_id = meal_entry.get("meal_ID", "")
+                meal_date = meal_entry.get("date", "")
+                if meal_id and meal_date:
+                    existing = recipe_last_planned.get(meal_id, "")
+                    if meal_date > existing:
+                        recipe_last_planned[meal_id] = meal_date
+
             # First get the list of recipe UIDs
             response = await self._make_authenticated_request("GET", "/sync/recipes")
             recipe_list = response.get("result", [])
@@ -904,10 +1091,8 @@ class PaprikaClient:
             if not recipe_list:
                 return []
 
-            # Limit the number of recipes to fetch
             recipe_list = recipe_list[:limit]
 
-            # Fetch full recipe data for each UID
             recipes = []
             for recipe_info in recipe_list:
                 uid = recipe_info["uid"]
@@ -919,9 +1104,11 @@ class PaprikaClient:
 
                     recipe_data = recipe_response.get("result", {})
 
-                    # Skip recipes in trash
                     if recipe_data.get("in_trash", False):
                         continue
+
+                    if uid in recipe_last_planned:
+                        recipe_data["last_planned"] = recipe_last_planned[uid]
 
                     recipes.append(recipe_data)
 
@@ -1038,6 +1225,605 @@ class PaprikaClient:
         except Exception as e:
             logger.error(f"Failed to regenerate image for recipe {uid}: {str(e)}")
             raise PaprikaAPIError(f"Failed to regenerate image: {str(e)}")
+
+    async def get_meal_plan(
+        self,
+        num_days: Optional[int] = None,
+        meal_type: Optional[str] = "dinner",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get meal plan entries from Paprika.
+
+        Args:
+            num_days: Days from today (default: 10, ignored if start_date/end_date provided)
+            meal_type: Filter by meal type (default: "dinner", None for all)
+            start_date: Start date YYYY-MM-DD (optional)
+            end_date: End date YYYY-MM-DD (optional)
+
+        Returns:
+            List of meal plan entries with meal, meal_ID, date, type fields
+        """
+        try:
+            try:
+                response = await self._make_v1_basic_auth_request("GET", "/sync/meals")
+            except PaprikaAPIError as e:
+                if "404" in str(e):
+                    response = await self._make_v1_basic_auth_request("GET", "/sync/meals/")
+                else:
+                    raise
+
+            meal_plan_data = response.get("result", {})
+            if isinstance(meal_plan_data, list):
+                all_entries = meal_plan_data
+            else:
+                all_entries = meal_plan_data.get("mealplan", meal_plan_data.get("meals", []))
+
+            if not all_entries:
+                return []
+
+            today = datetime.now().date()
+
+            if start_date and end_date:
+                try:
+                    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+                    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+                except ValueError as e:
+                    raise ValueError(f"Invalid date format. Expected YYYY-MM-DD: {str(e)}")
+            elif start_date:
+                try:
+                    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+                    end_date_obj = today + timedelta(days=num_days if num_days is not None else 10)
+                except ValueError as e:
+                    raise ValueError(f"Invalid start_date format. Expected YYYY-MM-DD: {str(e)}")
+            elif end_date:
+                try:
+                    start_date_obj = today
+                    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+                except ValueError as e:
+                    raise ValueError(f"Invalid end_date format. Expected YYYY-MM-DD: {str(e)}")
+            else:
+                num_days_val = num_days if num_days is not None else 10
+                start_date_obj = today
+                end_date_obj = today + timedelta(days=num_days_val)
+
+            meal_type_map = {1: "breakfast", 2: "dinner", 3: "lunch"}
+            reverse_meal_type_map = {"breakfast": 1, "dinner": 2, "lunch": 3}
+
+            filtered_entries = []
+            for entry in all_entries:
+                entry_date_str = entry.get("date", "")
+                if not entry_date_str:
+                    continue
+
+                try:
+                    if " " in entry_date_str:
+                        entry_date = datetime.strptime(entry_date_str.split()[0], "%Y-%m-%d").date()
+                        date_str_for_result = entry_date_str.split()[0]
+                    else:
+                        entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
+                        date_str_for_result = entry_date_str
+
+                    if start_date_obj <= entry_date <= end_date_obj:
+                        entry_type = entry.get("type")
+                        entry_type_str = None
+                        if isinstance(entry_type, int):
+                            entry_type_str = meal_type_map.get(entry_type, "dinner")
+                        elif isinstance(entry_type, str):
+                            entry_type_str = entry_type.lower()
+
+                        if meal_type is None:
+                            include_entry = True
+                        else:
+                            meal_type_int = reverse_meal_type_map.get(meal_type.lower())
+                            include_entry = (
+                                entry_type_str == meal_type.lower()
+                                or entry_type == meal_type_int
+                            )
+
+                        if include_entry:
+                            recipe_uid = (
+                                entry.get("recipe_uid")
+                                or entry.get("recipe_id")
+                                or entry.get("meal_id")
+                            )
+                            recipe_name = (
+                                entry.get("name")
+                                or entry.get("recipe_name")
+                                or entry.get("meal")
+                            )
+                            filtered_entries.append({
+                                "meal": recipe_name or "Unknown",
+                                "meal_ID": recipe_uid or "",
+                                "date": date_str_for_result,
+                                "type": entry_type_str or "dinner",
+                            })
+                except ValueError:
+                    continue
+
+            filtered_entries.sort(key=lambda x: x.get("date", ""))
+            logger.info(f"Successfully fetched {len(filtered_entries)} meal plan entries")
+            return filtered_entries
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to get meal plan: {error_msg}")
+            raise PaprikaAPIError(f"Failed to get meal plan: {error_msg}")
+
+    async def add_meal_to_plan(
+        self,
+        meal: Optional[str] = None,
+        meal_id: Optional[str] = None,
+        date: Optional[str] = None,
+        meal_type: str = "dinner",
+    ) -> Dict[str, Any]:
+        """Add a meal to the meal plan."""
+        recipe_uid = meal_id
+        recipe_name = None
+
+        if meal and not meal_id:
+            recipes = await self.list_recipes(limit=1000)
+            matched_recipe = self._find_recipe_by_name(meal, recipes)
+            recipe_uid = matched_recipe["uid"]
+            recipe_name = matched_recipe["name"]
+        elif meal_id:
+            try:
+                recipe_response = await self._make_authenticated_request(
+                    "GET", f"/sync/recipe/{meal_id}/"
+                )
+                recipe_data = recipe_response.get("result", {})
+                recipe_name = recipe_data.get("name", "")
+            except Exception:
+                recipe_name = "Unknown Recipe"
+
+        if not recipe_uid:
+            raise MealNotFoundError("Either meal name or meal_id must be provided")
+
+        if date:
+            parsed_date = self._parse_flexible_date(date)
+        else:
+            current_plan = await self.get_meal_plan(num_days=365, meal_type=None)
+            parsed_date = self._get_next_free_day(current_plan, meal_type)
+
+        meal_entry_id = self._generate_uuid()
+        meal_type_map = {"breakfast": 1, "dinner": 2, "lunch": 3}
+        meal_type_int = meal_type_map.get(meal_type.lower(), 2)
+        date_with_time = f"{parsed_date} 00:00:00"
+
+        meal_entry = {
+            "uid": meal_entry_id,
+            "recipe_uid": recipe_uid,
+            "name": recipe_name or "Unknown",
+            "date": date_with_time,
+            "type": meal_type_int,
+            "order_flag": 0,
+            "deleted": False,
+        }
+
+        try:
+            meals_array = [meal_entry]
+            gzipped_data = self._gzip_json(meals_array)
+            data = aiohttp.FormData()
+            data.add_field(
+                "data", gzipped_data, content_type="application/octet-stream", filename="data"
+            )
+            await self._make_v1_basic_auth_request("POST", "/sync/meals/", data=data)
+
+            logger.info(f"Successfully added meal '{recipe_name}' to meal plan on {parsed_date}")
+            return {
+                "meal": recipe_name or "Unknown",
+                "meal_ID": recipe_uid,
+                "date": parsed_date,
+                "type": meal_type,
+            }
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to add meal to plan: {error_msg}")
+            raise PaprikaAPIError(f"Failed to add meal to plan: {error_msg}")
+
+    async def remove_meal_from_plan(
+        self,
+        meal: Optional[str] = None,
+        meal_id: Optional[str] = None,
+        date: Optional[str] = None,
+        meal_type: str = "dinner",
+    ) -> Dict[str, Any]:
+        """Remove a meal from the meal plan."""
+        current_plan = await self.get_meal_plan(num_days=365, meal_type=None)
+
+        if not current_plan:
+            raise MealNotFoundError("No meals found in meal plan")
+
+        meal_to_remove = None
+
+        if not meal and not meal_id and not date:
+            sorted_plan = sorted(
+                current_plan,
+                key=lambda x: (x.get("date", ""), x.get("type", "").lower() != meal_type.lower()),
+                reverse=True,
+            )
+            meal_to_remove = sorted_plan[0]
+        elif date:
+            parsed_date = self._parse_flexible_date(date)
+            matching_meals = [
+                m for m in current_plan
+                if m.get("date") == parsed_date
+                and (meal_type is None or m.get("type", "").lower() == meal_type.lower())
+            ]
+            if meal or meal_id:
+                search_value = (meal or "").lower() if meal else meal_id
+                matching_meals = [
+                    m for m in matching_meals
+                    if (m.get("meal", "").lower() == search_value)
+                    or (m.get("meal_ID", "") == search_value)
+                ]
+            if not matching_meals:
+                raise MealNotFoundError(f"No meal found on {parsed_date} matching the criteria")
+            meal_to_remove = matching_meals[0]
+        elif meal or meal_id:
+            search_value = (meal or "").lower() if meal else meal_id
+            matching_meals = [
+                m for m in current_plan
+                if (m.get("meal", "").lower() == search_value)
+                or (m.get("meal_ID", "") == search_value)
+            ]
+            if date:
+                parsed_date = self._parse_flexible_date(date)
+                matching_meals = [m for m in matching_meals if m.get("date") == parsed_date]
+            if not matching_meals:
+                raise MealNotFoundError(f"No meal found matching '{search_value}'")
+            if len(matching_meals) > 1:
+                matching_meals.sort(key=lambda x: x.get("date", ""), reverse=True)
+            meal_to_remove = matching_meals[0]
+
+        if not meal_to_remove:
+            raise MealNotFoundError("No meal found matching the criteria")
+
+        entry_date = meal_to_remove.get("date", "")
+        entry_type = meal_to_remove.get("type", "")
+        entry_recipe_uid = meal_to_remove.get("meal_ID", "")
+
+        try:
+            response = await self._make_v1_basic_auth_request("GET", "/sync/meals/")
+            meal_plan_data = response.get("result", {})
+            if isinstance(meal_plan_data, list):
+                all_entries = meal_plan_data
+            else:
+                all_entries = meal_plan_data.get("mealplan", meal_plan_data.get("meals", []))
+
+            meal_type_map = {1: "breakfast", 2: "dinner", 3: "lunch"}
+            active_entries = [e for e in all_entries if not e.get("deleted", False)]
+
+            entry_to_delete = None
+            for entry in active_entries:
+                entry_date_check = entry.get("date", "")
+                entry_date_check_clean = (
+                    entry_date_check.split()[0] if " " in entry_date_check else entry_date_check
+                )
+                entry_type_raw = entry.get("type", "")
+                if isinstance(entry_type_raw, int):
+                    entry_type_check = meal_type_map.get(entry_type_raw, "dinner")
+                elif isinstance(entry_type_raw, str):
+                    entry_type_check = entry_type_raw.lower()
+                else:
+                    entry_type_check = "dinner"
+                entry_recipe_check = (
+                    entry.get("recipe_uid") or entry.get("recipe_id") or entry.get("meal_id")
+                )
+                if (
+                    entry_date_check_clean == entry_date
+                    and entry_type_check == entry_type.lower()
+                    and entry_recipe_check == entry_recipe_uid
+                ):
+                    entry_to_delete = entry
+                    break
+
+            if not entry_to_delete:
+                raise MealNotFoundError("Meal plan entry not found for deletion")
+
+            entry_id = entry_to_delete.get("uid") or entry_to_delete.get("id") or entry_recipe_uid
+
+            if not entry_id:
+                raise MealNotFoundError("Meal plan entry UID not found for deletion")
+
+            soft_delete_entry = {"uid": entry_id, "deleted": True}
+            meals_array = [soft_delete_entry]
+            gzipped_data = self._gzip_json(meals_array)
+            data = aiohttp.FormData()
+            data.add_field(
+                "data", gzipped_data, content_type="application/octet-stream", filename="data"
+            )
+            await self._make_v1_basic_auth_request("POST", "/sync/meals/", data=data)
+
+            logger.info(
+                f"Successfully removed meal '{meal_to_remove.get('meal')}' from meal plan on {entry_date}"
+            )
+            return {
+                "result": "Meal removed",
+                "meal": meal_to_remove.get("meal", "Unknown"),
+                "meal_ID": meal_to_remove.get("meal_ID", ""),
+                "date": entry_date,
+                "type": entry_type,
+            }
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to remove meal from plan: {error_msg}")
+            raise PaprikaAPIError(f"Failed to remove meal from plan: {error_msg}")
+
+    async def get_grocery_lists(self) -> List[Dict[str, Any]]:
+        try:
+            response = await self._make_authenticated_request(
+                "GET", "/sync/grocerylists"
+            )
+            grocery_lists = response.get("result", [])
+
+            if not grocery_lists:
+                return []
+
+            result = []
+            for grocery_list in grocery_lists:
+                if "name" in grocery_list:
+                    result.append(
+                        {
+                            "name": grocery_list["name"],
+                            "is_default": grocery_list.get("is_default", False),
+                        }
+                    )
+
+            logger.info(f"Found {len(result)} grocery lists")
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get grocery lists: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get grocery lists: {str(e)}")
+
+    async def get_default_list_uuid(self) -> Optional[str]:
+        try:
+            response = await self._make_authenticated_request(
+                "GET", "/sync/grocerylists"
+            )
+            grocery_lists = response.get("result", [])
+
+            if not grocery_lists:
+                raise PaprikaAPIError("No grocery lists found")
+
+            for grocery_list in grocery_lists:
+                if grocery_list.get("is_default"):
+                    uid = grocery_list.get("uid")
+                    logger.info(
+                        f"Found default grocery list: {grocery_list.get('name')} (UID: {uid})"
+                    )
+                    return uid
+
+            raise PaprikaAPIError("No default grocery list found")
+
+        except Exception as e:
+            logger.error(f"Failed to get default grocery list UUID: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get default grocery list: {str(e)}")
+
+    async def _get_list_uuid_by_name(
+        self, grocery_list_name: Optional[str] = None
+    ) -> str:
+        if grocery_list_name is None:
+            return await self.get_default_list_uuid()
+
+        try:
+            response = await self._make_authenticated_request(
+                "GET", "/sync/grocerylists"
+            )
+            grocery_lists = response.get("result", [])
+
+            for grocery_list in grocery_lists:
+                if grocery_list.get("name") == grocery_list_name:
+                    return grocery_list.get("uid")
+
+            valid_names = []
+            for grocery_list in grocery_lists:
+                if "name" in grocery_list:
+                    valid_names.append(grocery_list["name"])
+
+            if valid_names:
+                valid_names_str = ", ".join([f"'{name}'" for name in valid_names])
+                raise PaprikaAPIError(
+                    f"Grocery list '{grocery_list_name}' not found. Valid grocery lists are: {valid_names_str}"
+                )
+            else:
+                raise PaprikaAPIError(
+                    f"Grocery list '{grocery_list_name}' not found. No grocery lists are available."
+                )
+
+        except Exception as e:
+            if isinstance(e, PaprikaAPIError):
+                raise
+            logger.error(f"Failed to get grocery list UUID: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get grocery list UUID: {str(e)}")
+
+    async def get_groceries(
+        self, grocery_list_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        try:
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            filtered_groceries = []
+            for grocery in groceries:
+                if grocery.get("list_uid") == list_uuid:
+                    filtered_groceries.append(
+                        {
+                            "name": grocery.get("name", ""),
+                            "quantity": grocery.get("quantity", ""),
+                        }
+                    )
+
+            logger.info(f"Found {len(filtered_groceries)} groceries in list")
+            return filtered_groceries
+
+        except Exception as e:
+            logger.error(f"Failed to get groceries: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get groceries: {str(e)}")
+
+    async def get_grocery(
+        self, item_name: str, grocery_list_name: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            for grocery in groceries:
+                grocery_name = grocery.get("name", "").strip()
+                if (
+                    grocery_name == item_name.strip()
+                    and grocery.get("list_uid") == list_uuid
+                ):
+                    return grocery
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to get grocery item '{item_name}': {str(e)}")
+            raise PaprikaAPIError(f"Failed to get grocery item: {str(e)}")
+
+    async def add_grocery(
+        self,
+        item_name: str,
+        quantity: Union[int, str] = 1,
+        grocery_list_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not item_name or not item_name.strip():
+            raise PaprikaAPIError("Item name cannot be empty")
+
+        try:
+            quantity_str = str(quantity)
+
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            existing_grocery = None
+            for grocery in groceries:
+                grocery_name = grocery.get("name", "").strip()
+                if (
+                    grocery_name == item_name.strip()
+                    and grocery.get("list_uid") == list_uuid
+                ):
+                    existing_grocery = grocery
+                    break
+
+            if existing_grocery:
+                grocery_uid = existing_grocery.get("uid")
+                current_quantity_str = str(existing_grocery.get("quantity", "0"))
+            else:
+                grocery_uid = self._generate_uuid()
+                current_quantity_str = "0"
+
+            final_quantity_str, _ = self._add_quantities(
+                current_quantity_str, quantity_str
+            )
+
+            grocery_data = [
+                {
+                    "uid": grocery_uid,
+                    "name": item_name.strip(),
+                    "ingredient": item_name.strip(),
+                    "quantity": final_quantity_str,
+                    "recipe_uid": None,
+                    "order_flag": 316,
+                    "purchased": False,
+                    "aisle": "Produce",
+                    "recipe": None,
+                    "instruction": "",
+                    "separate": False,
+                    "aisle_uid": "F94467760BF4BC6B9521FFA9329D0F1DBCCA0F5AC0808BD8552FB375A565FB9E",
+                    "list_uid": list_uuid,
+                }
+            ]
+
+            gzipped_data = self._gzip_json(grocery_data)
+            data = aiohttp.FormData()
+            data.add_field(
+                "data",
+                BytesIO(gzipped_data),
+                filename="grocery.json.gz",
+                content_type="application/octet-stream",
+            )
+
+            await self._make_authenticated_request("POST", "/sync/groceries", data=data)
+
+            logger.info(
+                f"Successfully added {quantity_str} '{item_name}' (total: {final_quantity_str})"
+            )
+            return {
+                "name": item_name.strip(),
+                "quantity": final_quantity_str,
+            }
+
+        except PaprikaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to add grocery '{item_name}': {str(e)}")
+            raise PaprikaAPIError(f"Failed to add grocery: {str(e)}")
+
+    async def clear_grocery_list(self, grocery_list_name: Optional[str] = None) -> bool:
+        try:
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            groceries_to_delete = []
+            for grocery in groceries:
+                if grocery.get("list_uid") == list_uuid:
+                    groceries_to_delete.append(grocery)
+
+            if not groceries_to_delete:
+                logger.info("Grocery list is already empty")
+                return True
+
+            grocery_data_list = []
+            for grocery in groceries_to_delete:
+                grocery_item = {
+                    "uid": grocery.get("uid"),
+                    "name": grocery.get("name", ""),
+                    "ingredient": grocery.get("ingredient", ""),
+                    "quantity": "0",
+                    "recipe_uid": grocery.get("recipe_uid"),
+                    "order_flag": grocery.get("order_flag", 316),
+                    "purchased": False,
+                    "aisle": grocery.get("aisle", "Produce"),
+                    "recipe": grocery.get("recipe"),
+                    "instruction": grocery.get("instruction", ""),
+                    "separate": grocery.get("separate", False),
+                    "aisle_uid": grocery.get(
+                        "aisle_uid",
+                        "F94467760BF4BC6B9521FFA9329D0F1DBCCA0F5AC0808BD8552FB375A565FB9E",
+                    ),
+                    "list_uid": list_uuid,
+                }
+                grocery_data_list.append(grocery_item)
+
+            gzipped_data = self._gzip_json(grocery_data_list)
+            data = aiohttp.FormData()
+            data.add_field(
+                "data",
+                BytesIO(gzipped_data),
+                filename="grocery.json.gz",
+                content_type="application/octet-stream",
+            )
+
+            await self._make_authenticated_request("POST", "/groceries", data=data)
+
+            logger.info(
+                f"Successfully cleared {len(groceries_to_delete)} items from grocery list"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to clear grocery list: {str(e)}")
+            raise PaprikaAPIError(f"Failed to clear grocery list: {str(e)}")
 
     async def close(self):
         """Close the HTTP session."""

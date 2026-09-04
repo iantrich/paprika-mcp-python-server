@@ -10,7 +10,12 @@ from mcp.types import TextContent, Tool
 
 from paprika_mcp_server.config import get_config
 from paprika_mcp_server.image_generator import ImageGenerator
-from paprika_mcp_server.paprika_client import PaprikaClient, ValidationError
+from paprika_mcp_server.paprika_client import (
+    MealMatchAmbiguousError,
+    MealNotFoundError,
+    PaprikaClient,
+    ValidationError,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -473,6 +478,152 @@ async def main():
                         },
                     },
                 ),
+                Tool(
+                    name="add_meal_to_plan",
+                    description="Add a meal to the meal plan",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "meal": {
+                                "type": "string",
+                                "description": "Meal name for fuzzy matching (optional if meal_id provided)",
+                            },
+                            "meal_id": {
+                                "type": "string",
+                                "description": "Recipe UUID (optional if meal provided)",
+                            },
+                            "date": {
+                                "type": "string",
+                                "description": 'Date in flexible format - accepts "YYYY-MM-DD", "dd mmm", "dd mmmm", etc. Optional, defaults to next free day.',
+                            },
+                            "type": {
+                                "type": "string",
+                                "description": "Meal type (default: dinner)",
+                                "default": "dinner",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="remove_meal_from_plan",
+                    description="Remove a meal from the meal plan. If no arguments provided, removes meal on latest date in mealplan",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "meal": {
+                                "type": "string",
+                                "description": "Meal name (optional)",
+                            },
+                            "meal_id": {
+                                "type": "string",
+                                "description": "Recipe UUID (optional)",
+                            },
+                            "date": {
+                                "type": "string",
+                                "description": 'Date in flexible format (optional, defaults to last day with matching meal)',
+                            },
+                            "type": {
+                                "type": "string",
+                                "description": "Meal type for filtering (default: dinner)",
+                                "default": "dinner",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="list_meal_plan",
+                    description="List meal plan entries",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "num_days": {
+                                "type": "integer",
+                                "description": "Number of days to show (default: 10)",
+                                "default": 10,
+                            },
+                            "meal_type": {
+                                "type": "string",
+                                "description": "Filter by meal type (default: dinner)",
+                                "default": "dinner",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_grocery_lists",
+                    description="Get all grocery list names from Paprika",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
+                Tool(
+                    name="get_groceries",
+                    description="Get all groceries from a grocery list",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            }
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_grocery",
+                    description="Get a specific grocery item by name from a grocery list",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "item_name": {
+                                "type": "string",
+                                "description": "Name of the grocery item",
+                            },
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            },
+                        },
+                        "required": ["item_name"],
+                    },
+                ),
+                Tool(
+                    name="add_grocery",
+                    description="Add a grocery item to a grocery list (adds to existing quantity if item already exists). Quantity can be an integer or string like '1 kilo', '4 liters', or '-2 kilos' to subtract.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "item_name": {
+                                "type": "string",
+                                "description": "Name of the grocery item to add",
+                            },
+                            "quantity": {
+                                "type": "string",
+                                "description": "Quantity to add (default: '1'). Can be a number or string with unit like '1 kilo', '4 liters'. Use negative values like '-2 kilos' to subtract.",
+                                "default": "1",
+                            },
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            },
+                        },
+                        "required": ["item_name"],
+                    },
+                ),
+                Tool(
+                    name="clear_grocery_list",
+                    description="Clear all items from a grocery list",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            }
+                        },
+                    },
+                ),
             ]
 
         @server.call_tool()
@@ -638,6 +789,9 @@ async def main():
                         time_info = _format_time_info(recipe)
                         if time_info:
                             recipe_text += f"  Time: {time_info}\n"
+
+                        if recipe.get("last_planned"):
+                            recipe_text += f"  Last planned: {recipe['last_planned']}\n"
 
                         if recipe.get("ingredients"):
                             ingredients_lines = recipe["ingredients"].split("\n")
@@ -1041,6 +1195,152 @@ async def main():
                         result_text += _format_recipe_summary(recipe) + "\n"
 
                     return [TextContent(type="text", text=result_text)]
+
+                elif name == "add_meal_to_plan":
+                    meal = arguments.get("meal")
+                    meal_id = arguments.get("meal_id")
+                    date = arguments.get("date")
+                    meal_type = arguments.get("type", "dinner")
+
+                    try:
+                        result = await paprika_client.add_meal_to_plan(
+                            meal=meal, meal_id=meal_id, date=date, meal_type=meal_type
+                        )
+                        all_meals = await paprika_client.get_meal_plan(num_days=365, meal_type=None)
+                        lunch_count = sum(1 for m in all_meals if m.get("type", "").lower() == "lunch")
+                        dinner_count = sum(1 for m in all_meals if m.get("type", "").lower() == "dinner")
+                        formatted_date = paprika_client._format_date_readable(result["date"])
+                        response_text = (
+                            f"Meal '{result['meal']}' added to the meal plan on {formatted_date}. "
+                            f"Now {lunch_count} lunches and {dinner_count} dinners are planned."
+                        )
+                        return [TextContent(type="text", text=response_text)]
+                    except MealNotFoundError as e:
+                        return [TextContent(type="text", text=f"Meal not found: {str(e)}")]
+                    except MealMatchAmbiguousError as e:
+                        match_names = ", ".join(m.get("name", "") for m in e.matches[:5])
+                        return [TextContent(type="text", text=f"Ambiguous meal name. Matches: {match_names}")]
+
+                elif name == "remove_meal_from_plan":
+                    meal = arguments.get("meal")
+                    meal_id = arguments.get("meal_id")
+                    date = arguments.get("date")
+                    meal_type = arguments.get("type", "dinner")
+
+                    try:
+                        result = await paprika_client.remove_meal_from_plan(
+                            meal=meal, meal_id=meal_id, date=date, meal_type=meal_type
+                        )
+                        formatted_date = paprika_client._format_date_readable(result["date"])
+                        response_text = (
+                            f"Meal '{result['meal']}' removed from meal plan on {formatted_date}"
+                        )
+                        return [TextContent(type="text", text=response_text)]
+                    except MealNotFoundError as e:
+                        return [TextContent(type="text", text=f"Meal not found: {str(e)}")]
+
+                elif name == "list_meal_plan":
+                    num_days = arguments.get("num_days", 10)
+                    meal_type = arguments.get("meal_type", "dinner")
+
+                    meals = await paprika_client.get_meal_plan(
+                        num_days=num_days, meal_type=meal_type
+                    )
+                    if not meals:
+                        return [TextContent(type="text", text="No meals planned.")]
+
+                    meal_text = f"Meal plan ({meal_type or 'all'}, next {num_days} days):\n\n"
+                    for entry in meals:
+                        formatted_date = paprika_client._format_date_readable(entry["date"])
+                        meal_text += f"- {formatted_date}: {entry['meal']}\n"
+                    return [TextContent(type="text", text=meal_text)]
+
+                elif name == "get_grocery_lists":
+                    lists = await paprika_client.get_grocery_lists()
+                    if not lists:
+                        return [
+                            TextContent(
+                                type="text",
+                                text="No grocery lists found in your Paprika account.",
+                            )
+                        ]
+                    list_text = "Grocery lists:\n"
+                    for grocery_list in lists:
+                        list_name = grocery_list.get("name", "")
+                        is_default = grocery_list.get("is_default", False)
+                        default_marker = " (default)" if is_default else ""
+                        list_text += f"- {list_name}{default_marker}\n"
+                    return [TextContent(type="text", text=list_text)]
+
+                elif name == "get_groceries":
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    groceries = await paprika_client.get_groceries(grocery_list_name)
+                    if not groceries:
+                        list_name = grocery_list_name or "default"
+                        return [
+                            TextContent(
+                                type="text",
+                                text=f"No groceries found in '{list_name}' list.",
+                            )
+                        ]
+                    grocery_text = (
+                        f"Groceries on {grocery_list_name or 'default'} list:\n"
+                    )
+                    for grocery in groceries:
+                        quantity = grocery.get("quantity", "")
+                        name = grocery.get("name", "")
+                        grocery_text += f"- {quantity}, {name}\n"
+                    return [TextContent(type="text", text=grocery_text)]
+
+                elif name == "get_grocery":
+                    item_name = arguments["item_name"]
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    grocery = await paprika_client.get_grocery(
+                        item_name, grocery_list_name
+                    )
+                    if not grocery:
+                        list_name = grocery_list_name or "default"
+                        return [
+                            TextContent(
+                                type="text",
+                                text=f"Grocery item '{item_name}' not found in '{list_name}' list.",
+                            )
+                        ]
+                    quantity = grocery.get("quantity", "")
+                    name = grocery.get("name", "")
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Grocery item: {name}\nQuantity: {quantity}",
+                        )
+                    ]
+
+                elif name == "add_grocery":
+                    item_name = arguments["item_name"]
+                    quantity = arguments.get("quantity", "1")
+                    if isinstance(quantity, int):
+                        quantity = str(quantity)
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    result = await paprika_client.add_grocery(
+                        item_name, quantity, grocery_list_name
+                    )
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Added {quantity} '{item_name}' to grocery list. Total quantity: {result['quantity']}",
+                        )
+                    ]
+
+                elif name == "clear_grocery_list":
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    await paprika_client.clear_grocery_list(grocery_list_name)
+                    list_name = grocery_list_name or "default"
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Successfully cleared '{list_name}' grocery list.",
+                        )
+                    ]
 
                 else:
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
