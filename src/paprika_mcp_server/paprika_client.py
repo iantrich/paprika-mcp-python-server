@@ -305,8 +305,21 @@ class PaprikaClient:
         return matches[0][1]
 
     def _parse_flexible_date(self, date_str: str) -> str:
+        """Parse a date string into "YYYY-MM-DD".
+
+        ISO 8601 is tried first and exactly: it is unambiguous, and passing it
+        to dateutil's heuristic parser reorders month and day. Everything else
+        falls back to dateutil with US month-first convention.
+        """
+        date_str = date_str.strip()
+
         try:
-            parsed = date_parser.parse(date_str, dayfirst=True)
+            return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+        try:
+            parsed = date_parser.parse(date_str, dayfirst=False)
             return parsed.strftime("%Y-%m-%d")
         except Exception as e:
             raise ValueError(f"Cannot parse date '{date_str}': {str(e)}")

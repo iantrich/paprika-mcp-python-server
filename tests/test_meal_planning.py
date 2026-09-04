@@ -77,6 +77,24 @@ class TestMealPlanningHelpers:
         with pytest.raises(ValueError):
             client._parse_flexible_date("invalid date")
 
+    def test_parse_flexible_date_iso_is_never_reordered(self, client):
+        """ISO 8601 input is unambiguous and must be returned as-is."""
+        assert client._parse_flexible_date("2025-11-03") == "2025-11-03"
+        assert client._parse_flexible_date("2025-03-11") == "2025-03-11"
+
+    def test_parse_flexible_date_iso_day_le_12(self, client):
+        """Days <= 12 are where a month/day swap is silently plausible."""
+        for iso in ["2026-01-02", "2026-09-04", "2026-12-11", "2026-06-06"]:
+            assert client._parse_flexible_date(iso) == iso
+
+    def test_parse_flexible_date_slash_is_month_first(self, client):
+        """US convention: 11/03/2025 is 3 November, not 11 March."""
+        assert client._parse_flexible_date("11/03/2025") == "2025-11-03"
+
+    def test_parse_flexible_date_rejects_garbage(self, client):
+        with pytest.raises(ValueError):
+            client._parse_flexible_date("not a date at all")
+
     def test_format_date_readable(self, client):
         """Test formatting date to readable format."""
         result = client._format_date_readable("2025-11-03")
